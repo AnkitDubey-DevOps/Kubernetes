@@ -440,3 +440,160 @@ In dev/test environments with limited CPU/RAM, Recreate avoids allocating extra 
       replicas: 3
       strategy:
         type: Recreate   # Kills all 3 old pods first, then spawns 3 new pods
+
+# How does maxSurge and maxUnavailable affect rollout behavior? → maxSurge = extra pods allowed above desired count during update; maxUnavailable = how many can be down at once. Tuning these balances speed vs availability.
+
+## UNDERSTANDING maxSurge AND maxUnavailable
+
+### 1. CORE DEFINITIONS:
+
+In a RollingUpdate deployment strategy, maxSurge and maxUnavailable control how fast Kubernetes replaces old Pods with new Pods and how much capacity is maintained during the rollout.
+
+- **maxSurge** : The MAXIMUM number of Pods that can be created ABOVE the desired replica count during an update.
+- **maxUnavailable** : The MAXIMUM number of Pods that can be UN-AVAILABLE (taken offline) below the desired replica count during an update.
+
+**Note:** Both parameters can be set as an absolute number (e.g., 2) or a percentage of target replicas (e.g., 25%).
+
+## HOW THEY CONTROL ROLLOUT BEHAVIOR (EXAMPLE: 4 REPLICAS)
+
+**Target Replicas = 4**
+
+### SCENARIO A: DEFAULT SETTINGS (maxSurge: 25%, maxUnavailable: 25%)
+
+- maxSurge = 25% of 4 = 1 extra Pod (Max allowed total Pods = 5)
+- maxUnavailable = 25% of 4 = 1 offline Pod (Min required ready Pods = 3)
+
+**Behavior:**
+
+1. K8s creates 1 new Pod (Total = 5) and terminates 1 old Pod (Active = 3).
+2. Waits for new Pods to pass readiness probes.
+3. Repeats until all 4 Pods are running the new version.
+
+**Result:** Balanced speed and safety with guaranteed 75% traffic capacity.
+
+# How does Kubernetes know a rollout has failed, and how do you set that up? → Via readiness probes not passing + progressDeadlineSeconds; after that, the rollout is marked failed but won't auto-rollback unless you script it.
+
+## HOW KUBERNETES DETECTS A FAILED ROLLOUT
+
+### 1. HOW KUBERNETES KNOWS A ROLLOUT HAS FAILED:
+
+Kubernetes does NOT automatically consider a deployment failed just because a Pod crashes once. It determines failure through a combination of two mechanisms:
+
+- **Readiness Probes:**
+  As new Pods are spawned during a rolling update, Kubernetes runs their readiness probes. If a new Pod crashes, enters CrashLoopBackOff, or fails its readiness check, Kubernetes stops routing traffic to it and halts further rollout progress (it stops replacing the remaining old Pods).
+
+- **progressDeadlineSeconds:**
+  This field defines the maximum time (in seconds) Kubernetes will wait for a rollout to make progress. If new Pods fail to reach a "Ready" state within this timeframe, Kubernetes officially marks the Deployment status as Progressing = False (Reason: ProgressDeadlineExceeded).
+
+### 2. IMPORTANT CAVEAT (NO AUTOMATIC ROLLBACK):
+
+When progressDeadlineSeconds is exceeded:
+
+- Kubernetes MARKS the deployment as failed.
+- Kubernetes STOPS creating new broken Pods.
+- Kubernetes DOES NOT automatically roll back to the previous revision by default.
+- You must trigger a rollback via CLI, CI/CD pipeline, or GitOps controller.
+
+## HOW TO SET UP FAILURE DETECTION IN YOUR DEPLOYMENT MANIFEST
+
+Add `progressDeadlineSeconds` under `spec`, and configure robust health probes under the container spec.
+
+### Example Deployment Manifest:
+
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: my-app
+    spec:
+      replicas: 4
+      progressDeadlineSeconds: 300   # Fail rollout if not complete in 5 minutes (300s)
+      revisionHistoryLimit: 10       # Retain past 10 revisions for rollback
+      strategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 25%
+          maxUnavailable: 25%
+      template:
+        spec:
+          containers:
+          - name: my-app
+            image: myregistry/myapp:v2.0.0
+            readinessProbe:
+              httpGet:
+                path: /healthz
+                port: 8080
+              initialDelaySeconds: 10
+              periodSeconds: 5
+              failureThreshold: 3    # Mark unready after 3 failures
+
+## AUTOMATING ROLLBACKS IN CI/CD OR GITOPS
+
+Since Kubernetes natively halts rather than auto-reverts, you can automate rollbacks in your deployment workflow:
+
+### Option A: CI/CD Pipeline Scripting (e.g., GitHub Actions / Jenkins)
+
+After triggering a deployment, monitor `kubectl rollout status`. If it times out, trigger an automatic rollback:
+
+### Command Script:
+
+    # Monitor status with a timeout
+    if ! kubectl rollout status deployment/my-app --timeout=300s -n <namespace>; then
+      echo "Rollout failed! Initiating automatic rollback..."
+      kubectl rollout undo deployment/my-app -n <namespace>
+      exit 1
+    fi
+
+### Option B: GitOps Operators (e.g., Argo Rollouts / Flagger)
+
+Advanced progressive delivery tools like Argo Rollouts or Flagger natively extend Kubernetes to perform automated rollbacks based on real-time metrics (e.g., HTTP 5xx error rates or latency spikes measured via Prometheus/Grafana).
+
+# "If a rollback also fails, what's your next step?" → Check revision history (kubectl rollout history), roll back to a specific known-good revision, or manually redeploy a pinned image tag.
+
+## WHAT TO DO IF A KUBERNETES ROLLBACK FAILS
+
+If running `kubectl rollout undo` fails or reverts to a state that is also broken, it usually means the immediately preceding revision was corrupted, missing secrets, or pointing to a deprecated container image tag.
+
+## STEP-BY-STEP RECOVERY WORKFLOW
+
+### STEP 1: INSPECT REVISION HISTORY
+
+List all saved Deployment revisions to identify a confirmed, known-good historical revision (rather than relying on the default n-1 rollback target).
+
+**Command:**
+
+    kubectl rollout history deployment/<deployment-name> -n <namespace>
+
+Inspect details of a specific older revision:
+
+    kubectl rollout history deployment/<deployment-name> --revision=<number> -n <namespace>
+
+### STEP 2: ROLL BACK TO A SPECIFIC KNOWN-GOOD REVISION
+
+Target an explicit, verified revision number from your deployment history.
+
+**Command:**
+
+    kubectl rollout undo deployment/<deployment-name> --to-revision=<number> -n <namespace>
+
+### STEP 3: MANUALLY FORCE A PINNED STABLE CONTAINER IMAGE
+
+If the revision history is corrupted or unavailable, override the deployment image directly using an explicitly tagged, stable production image (e.g., `v1.8.0` instead of `latest`).
+
+**Command:**
+
+    kubectl set image deployment/<deployment-name> <container-name>=<registry>/<image>:v1.8.0 -n <namespace>
+
+### STEP 4: PAUSE ROLLOUT & FIX CLUSTER-LEVEL DEPENDENCIES
+
+If the rollback is failing due to cluster-level dependencies (e.g., a missing ConfigMap, deleted Secret, or database migration failure):
+
+1. Pause the deployment to stop the continuous crash/restart churn:
+
+       kubectl rollout pause deployment/<deployment-name> -n <namespace>
+
+2. Re-create or fix the missing cluster resources (Secrets, ConfigMaps, PVCs).
+
+3. Resume the deployment once dependencies are restored:
+
+       kubectl rollout resume deployment/<deployment-name> -n <namespace>
+
