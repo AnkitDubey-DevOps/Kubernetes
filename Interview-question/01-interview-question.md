@@ -315,3 +315,83 @@ If the container keeps crashing immediately, run an ephemeral debug container wi
 
     kubectl debug pod/<pod-name> -it --image=busybox -- target-binary-name
 
+
+# 2. "How do you deploy a new version with zero downtime, and how do you roll back if it fails?"
+
+## ZERO-DOWNTIME DEPLOYMENT & ROLLBACK IN KUBERNETES
+
+### 1. DEPLOYING A NEW VERSION WITH ZERO DOWNTIME (ROLLING UPDATE)
+
+Kubernetes performs zero-downtime updates by default using the RollingUpdate strategy. It replaces old Pods with new Pods incrementally, ensuring traffic is always served by active Pods.
+
+**Step 1: Configure Deployment Strategy & Health Probes in YAML**
+
+In your Deployment manifest, define the RollingUpdate strategy alongside Readiness Probes. The Readiness Probe guarantees traffic is routed ONLY to new Pods that are fully ready.
+
+**Example Deployment Manifest Snippet:**
+
+    spec:
+      replicas: 4
+      strategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxSurge: 25%        # Max extra Pods created above target replica count
+          maxUnavailable: 25%  # Max Pods that can be offline during update
+      template:
+        spec:
+          containers:
+          - name: my-app
+            image: myregistry/myapp:v2.0.0
+            readinessProbe:
+              httpGet:
+                path: /healthz
+                port: 8080
+              initialDelaySeconds: 10
+              periodSeconds: 5
+
+**Step 2: Trigger the Update**
+
+Apply the updated manifest or set the new container image directly via CLI:
+
+**Command:**
+
+    kubectl set image deployment/myapp-deployment my-app=myregistry/myapp:v2.0.0 -n <namespace>
+
+**Step 3: Monitor the Progress**
+
+Track the rollout status in real time to ensure new Pods become healthy.
+
+**Command:**
+
+    kubectl rollout status deployment/myapp-deployment -n <namespace>
+
+## 2. HOW TO ROLL BACK IF THE DEPLOYMENT FAILS
+
+If the new version crashes, fails readiness checks, or throws errors, Kubernetes allows you to roll back immediately to a previous revision.
+
+**Step 1: Inspect Rollout History**
+
+List all recorded deployment revisions to identify the stable version.
+
+**Command:**
+
+    kubectl rollout history deployment/myapp-deployment -n <namespace>
+
+**Step 2: Undo the Deployment (Roll Back)**
+
+- Roll back to the IMMEDIATELY PREVIOUS version:
+
+      kubectl rollout undo deployment/myapp-deployment -n <namespace>
+
+- Roll back to a SPECIFIC revision number (e.g., Revision 2):
+
+      kubectl rollout undo deployment/myapp-deployment --to-revision=2 -n <namespace>
+
+**Step 3: Verify Rollback Success**
+
+Confirm that all Pods have successfully reverted to the healthy state.
+
+**Command:**
+
+    kubectl rollout status deployment/myapp-deployment -n <namespace>
+
