@@ -254,3 +254,64 @@ Investigate memory leaks, unoptimized database queries, or bloated garbage colle
 
 - Application stack traces, bad config values, unhandled runtime crashes.
 - OOMKilled (Exit Code 137), FailedMount (missing Secret/ConfigMap).
+
+# "How do you debug if kubectl logs shows nothing at all?" → Container may be failing before app starts logging; check init containers, kubectl get events, or exec into a debug container.
+
+## DEBUGGING WHEN `kubectl logs` SHOWS NOTHING AT ALL
+
+When `kubectl logs <pod-name>` returns completely blank output, it means the main application container exited before write streams (stdout/stderr) could capture logs, or the execution never reached your application runtime.
+
+## STEP-BY-STEP DIAGNOSTIC WORKFLOW
+
+### 1. CHECK INIT CONTAINERS FIRST
+
+If an Init Container fails, the main application container will NEVER start.
+
+**Commands:**
+
+    # List all containers in the Pod (including Init Containers)
+    kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.initContainers[*].name}'
+
+    # Check logs for a specific Init Container
+    kubectl logs <pod-name> -c <init-container-name> -n <namespace>
+
+### 2. INSPECT KUBERNETES SYSTEM EVENTS & POD DETAILS
+
+Cluster-level events report container runtime failures that happen before the app boots.
+
+**Command:**
+
+    kubectl describe pod <pod-name> -n <namespace>
+
+**What to look for:**
+
+- State / Last State: Check Exit Codes (e.g., Exit Code 127 = binary not found).
+- Events section (at bottom): Look for:
+  - FailedToStartContainer / InvalidImageName
+  - PermissionDenied (lacking execution permissions on entrypoint script)
+  - FailedMount (missing Secret, ConfigMap, or PersistentVolume)
+
+### 3. CHECK RECENT KUBERNETES EVENTS IN THE NAMESPACE
+
+Get a chronological view of events across the namespace.
+
+**Command:**
+
+    kubectl get events -n <namespace> --sort-by='.metadata.creationTimestamp'
+
+### 4. CHECK FOR ENTRYPOINT / CMD ISSUES IN DOCKERFILE
+
+Common causes of immediate silent crashes:
+
+- Shebang missing or invalid in startup script (e.g., `#!/bin/bash` missing in image).
+- Entrypoint binary path is incorrect or missing execution permissions (`chmod +x`).
+- Logging is directed to a file inside the container instead of stdout/stderr.
+
+### 5. ATTACH AN INTERACTIVE DEBUG CONTAINER
+
+If the container keeps crashing immediately, run an ephemeral debug container with an interactive shell to inspect the file system, entrypoint scripts, and permissions.
+
+**Command:**
+
+    kubectl debug pod/<pod-name> -it --image=busybox -- target-binary-name
+
