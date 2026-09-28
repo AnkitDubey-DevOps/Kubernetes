@@ -395,3 +395,48 @@ Confirm that all Pods have successfully reverted to the healthy state.
 
     kubectl rollout status deployment/myapp-deployment -n <namespace>
 
+
+# "What's the difference between RollingUpdate and Recreate strategy, and when would you use Recreate?" → Recreate kills all old pods before starting new ones — causes downtime, used when old/new versions can't run simultaneously (e.g., DB schema conflicts).
+
+## ROLLINGUPDATE VS. RECREATE STRATEGY
+
+### 1. CORE DEFINITIONS:
+
+- **RollingUpdate** : Replaces old Pods with new Pods gradually. Ensures continuous availability so users experience zero downtime.
+- **Recreate** : Kills ALL existing running Pods simultaneously BEFORE starting any new Pods. Guarantees downtime while new Pods boot up.
+
+### 2. KEY DIFFERENCES:
+
+| FEATURE | ROLLINGUPDATE | RECREATE |
+|---|---|---|
+| Downtime | Zero downtime | Guaranteed downtime |
+| Version Coexistence | Old and new versions run concurrently during update | Old and new versions NEVER run at the same time |
+| Resource Usage | Requires extra cluster capacity for surge Pods (maxSurge) | No extra capacity needed |
+| Rollback Speed | Gradual replacement back | Quick restart back to old |
+
+## WHEN TO USE THE RECREATE STRATEGY
+
+Use Recreate when your system cannot tolerate two different application versions running concurrently:
+
+### 1. BREAKING DATABASE SCHEMA CHANGES:
+
+When an update includes destructive or non-backward-compatible database schema migrations (e.g., dropping columns, changing data types), running old and new app instances at the same time will cause data corruption or app crashes.
+
+### 2. READWRITEONCE (RWO) PERSISTENT VOLUMES:
+
+If a Pod uses a PersistentVolume mounted in ReadWriteOnce mode, only ONE Pod can attach to that storage volume at a time. A RollingUpdate will fail because the new Pod cannot mount the volume until the old Pod terminates.
+
+### 3. SINGLETON PROCESSSES & STATEFUL MONOLITHS:
+
+Legacy services, background batch processors, or stateful applications where running multiple instances simultaneously leads to duplicate task execution or race conditions.
+
+### 4. NON-PRODUCTION ENVIRONMENT RESOURCE SAVINGS:
+
+In dev/test environments with limited CPU/RAM, Recreate avoids allocating extra resources for temporary surge Pods during deployments.
+
+## MANIFEST EXAMPLE
+
+    spec:
+      replicas: 3
+      strategy:
+        type: Recreate   # Kills all 3 old pods first, then spawns 3 new pods
