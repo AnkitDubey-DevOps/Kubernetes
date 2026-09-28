@@ -93,3 +93,50 @@ Inside the busybox shell:
 
     # Test database/port connection
     nc -zv <service-name> <port>
+
+# What's the difference between liveness and readiness probes, and how can a misconfigured one cause CrashLoopBackOff?
+
+Liveness restarts the container; readiness removes it from service endpoints. A too-aggressive liveness probe (short timeout/low failure threshold) can kill a slow-starting app repeatedly.
+
+## LIVENESS PROBE VS. READINESS PROBE
+
+| FEATURE | LIVENESS PROBE | READINESS PROBE |
+|---|---|---|
+| Primary Purpose | Detects if the container is ALIVE or deadlocked/unresponsive. | Detects if the container is READY to accept incoming network traffic |
+| Action on Failure | Kills and RESTARTS the container. | Removes Pod IP from Service endpoint (stops traffic, app keeps running) |
+| Ideal Use Case | App is stuck in a deadlock and cannot recover without a restart. | App is booting up, warming cache, or temporarily overloaded. |
+
+## HOW A MISCONFIGURED PROBE CAUSES CrashLoopBackOff
+
+When a Liveness Probe is too aggressive, it triggers a continuous restart loop:
+
+1. **SLOW STARTUP:** Your application takes 30 seconds to boot (loading cache, connecting to databases, initializing runtime).
+
+2. **AGGRESSIVE CHECK:** The liveness probe starts checking after 5 seconds (`initialDelaySeconds: 5`) with a low tolerance (`failureThreshold: 2`).
+
+3. **PREMATURE KILL:** The probe fails because the app isn't ready yet. Kubernetes assumes the container is deadlocked and KILLS IT.
+
+4. **THE LOOP:** Kubernetes restarts the container -> App attempts to boot -> Probe fails again -> Container killed again.
+
+Repeatedly failing and restarting causes Kubernetes to flag the Pod with CrashLoopBackOff.
+
+## HOW TO FIX & PREVENT THIS ISSUE
+
+### 1. Adjust Probe Tolerances:
+
+Give slow-starting apps enough buffer using `initialDelaySeconds` and `failureThreshold`.
+
+**Example Manifest Snippet:**
+
+    livenessProbe:
+      httpGet:
+        path: /healthz
+        port: 8080
+      initialDelaySeconds: 30  # Wait 30s before the first health check
+      periodSeconds: 10        # Check every 10 seconds
+      timeoutSeconds: 5         # Wait 5s for a response before timing out
+      failureThreshold: 3       # Require 3 consecutive failures before restarting
+
+### 2. Use a Startup Probe (Best Practice):
+
+For apps that take a long time to start, use a `startupProbe` alongside `livenessProbe`. Kubernetes disables liveness and readiness checks until the startup probe succeeds, preventing premature container restarts.
