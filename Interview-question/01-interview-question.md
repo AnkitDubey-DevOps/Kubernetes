@@ -140,3 +140,53 @@ Give slow-starting apps enough buffer using `initialDelaySeconds` and `failureTh
 ### 2. Use a Startup Probe (Best Practice):
 
 For apps that take a long time to start, use a `startupProbe` alongside `livenessProbe`. Kubernetes disables liveness and readiness checks until the startup probe succeeds, preventing premature container restarts.
+
+# "How do resource requests/limits relate to OOMKilled?" → Limits cap memory; exceeding it triggers OOMKill regardless of node capacity.
+
+## RESOURCE REQUESTS VS. LIMITS & OOMKilled
+
+### 1. CORE DEFINITIONS:
+
+- **Requests** : The MINIMUM guaranteed memory/CPU Kubernetes reserves for a pod on a node.
+  - Used by the Scheduler to decide which node has room to place the Pod.
+- **Limits** : The HARD CAP maximum amount of memory/CPU a container is allowed to consume.
+
+### 2. HOW OOMKilled OCCURS:
+
+- Memory is a non-compressible resource. Unlike CPU (which gets throttled when limits are exceeded), exceeding memory limits causes immediate termination.
+- When a container tries to allocate more RAM than specified in 'limits.memory', the Linux Kernel's Out-Of-Memory (OOM) Killer intervenes and instantly terminates the process.
+- The Pod exits with Exit Code 137 (OOMKilled) and enters a CrashLoopBackOff state.
+
+### 3. KEY INSIGHT:
+
+- OOMKill occurs strictly based on the container's defined 'limits.memory', NOT on available node capacity.
+- Even if the physical Kubernetes worker node has 128 GB of free, unused RAM, a container with a limit of 512Mi will be OOMKilled the second it requests 513Mi.
+
+## EXAMPLE MANIFEST & BEHAVIOR
+
+    resources:
+      requests:
+        memory: "256Mi"   # Guaranteed 256MB on scheduling
+      limits:
+        memory: "512Mi"   # Hard ceiling at 512MB
+
+Behavior Scenarios:
+- Usage < 256Mi  : Normal operation.
+- Usage = 400Mi  : Allowed (between request and limit).
+- Usage > 512Mi  : OOMKilled (Exit Code 137) triggered immediately by Linux Kernel.
+
+## HOW TO FIX OOMKilled ISSUES
+
+### 1. Check if Pod was OOMKilled:
+
+    kubectl describe pod <pod-name> -n <namespace>
+
+(Look for: "Last State: Terminated", "Reason: OOMKilled", "Exit Code: 137")
+
+### 2. Increase Memory Limits:
+
+Raise 'limits.memory' in your Deployment/StatefulSet YAML manifest.
+
+### 3. Profile Application Memory:
+
+Investigate memory leaks, unoptimized database queries, or bloated garbage collection settings within application code.
