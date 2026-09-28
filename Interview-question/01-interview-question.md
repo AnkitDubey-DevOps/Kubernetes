@@ -190,3 +190,67 @@ Raise 'limits.memory' in your Deployment/StatefulSet YAML manifest.
 ### 3. Profile Application Memory:
 
 Investigate memory leaks, unoptimized database queries, or bloated garbage collection settings within application code.
+
+# "How would you check node-level issues vs pod-level issues?" → kubectl describe node, check for pressure conditions (MemoryPressure, DiskPressure).
+
+## POD-LEVEL ISSUES VS. NODE-LEVEL ISSUES
+
+### 1. CORE DIFFERENCE:
+
+- **Pod-Level Issues** : Isolated to a specific container, application code, missing environment variables, or manifest misconfigurations.
+- **Node-Level Issues**: Affect all Pods running on that worker node due to resource exhaustion, kubelet failures, or infrastructure faults.
+
+## HOW TO DIAGNOSE NODE-LEVEL ISSUES
+
+### Step 1: Check Node Status and Readiness
+
+**Command:**
+
+    kubectl get nodes
+
+**What to look for:**
+
+- Status column: Look for 'NotReady' or 'SchedulingDisabled'.
+
+### Step 2: Inspect Node Pressure Conditions & System Events
+
+**Command:**
+
+    kubectl describe node <node-name>
+
+**What to look for in "Conditions":**
+
+- MemoryPressure = True : Node is dangerously low on RAM.
+- DiskPressure = True : Node root filesystem or image disk is full.
+- PIDPressure = True : Too many running processes on the node.
+- Ready = False : Kubelet isn't reporting health or network is down.
+
+**What to look for in "System Info & Events":**
+
+- OutOfDisk / OutOfMemory events logged at node scope.
+- Kubelet / Container Runtime (Docker/containerd) errors.
+
+## HOW TO DIAGNOSE POD-LEVEL ISSUES
+
+### Step 1: Check Pod Status across the Namespace
+
+**Command:**
+
+    kubectl get pods -n <namespace> -o wide
+
+**What to look for:**
+
+- Status: Pending, CrashLoopBackOff, ImagePullBackOff, Error.
+- Node Column: Check if all failing Pods belong to the SAME node (points to Node issue) or are spread across DIFFERENT nodes (points to Pod issue).
+
+### Step 2: Inspect Pod Logs & Configuration
+
+**Commands:**
+
+    kubectl logs <pod-name> -n <namespace> --previous
+    kubectl describe pod <pod-name> -n <namespace>
+
+**What to look for:**
+
+- Application stack traces, bad config values, unhandled runtime crashes.
+- OOMKilled (Exit Code 137), FailedMount (missing Secret/ConfigMap).
