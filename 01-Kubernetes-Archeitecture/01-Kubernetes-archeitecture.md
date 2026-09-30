@@ -171,3 +171,99 @@ Kubernetes architecture allows for significant customization:
 
 The flexibility of Kubernetes architecture allows organizations to tailor their clusters to specific needs, balancing factors such as operational complexity, performance, and management overhead.
 
+# Kubernetes Init Containers
+
+In Kubernetes, an Init Container is a specialized container defined in `spec.initContainers` that runs and completes (exit code `0`) BEFORE any main application containers (`spec.containers`) start.
+
+---
+
+## 1. CORE TECHNICAL ARCHITECTURE & LIFECYCLE
+
+### Sequential Execution
+
+- Init containers run strictly one after another in the exact order specified in the Pod manifest.
+
+### Pod Sandbox & Startup Flow
+
+1. Kubelet creates the Pod network sandbox (Pause container) and attaches volumes.
+2. Kubelet sequentially pulls, creates, and executes each Init Container.
+3. Init Container N+1 starts ONLY after Init Container N exits successfully with status `0`.
+4. App containers (`spec.containers`) start concurrently ONLY after ALL init containers succeed.
+
+### Restart Behavior & Failure Handling
+
+- If an init container fails (exit code != 0) or crashes:
+  - If `restartPolicy = Always` or `OnFailure`: Kubelet restarts the init container using exponential backoff (`10s`, `20s`, `40s` ... up to `5m`).
+  - If `restartPolicy = Never`: Kubelet marks the entire Pod state as Failed.
+- App containers remain in `ContainerCreating` or `Pending` state and will NOT start until init succeeds.
+
+### Resource Calculation (Scheduling)
+
+The Pod’s effective CPU/Memory requests and limits are calculated as:
+
+    Pod Request = max(Sum of App Requests, max(Individual Init Container Requests))
+
+This guarantees sufficient capacity during initialization without wasting resources at runtime.
+
+### Probes & Limitations
+
+- Init containers DO NOT support `livenessProbe`, `readinessProbe`, or `startupProbe`.
+- Execution success is determined solely by process exit code `0`.
+
+---
+
+## 2. KUBERNETES 1.28+ NATIVE SIDECARS (initContainers with restartPolicy: Always)
+
+Starting in Kubernetes v1.28+ (default in v1.29+), setting `restartPolicy: Always` on an entry inside `initContainers` transforms it into a Native Sidecar:
+
+- Starts sequentially during initialization like an init container.
+- Kubelet waits for its startup/readiness probe to pass before executing the next init or app container.
+- Continues running in parallel with app containers throughout the entire Pod lifecycle.
+- Shuts down AFTER main app containers terminate during Pod deletion.
+
+---
+
+## 3. TECHNICAL MANIFEST EXAMPLE
+
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: production-api-pod
+      namespace: default
+    spec:
+      restartPolicy: OnFailure
+      
+      volumes:
+      - name: shared-config
+        emptyDir: {}
+
+      initContainers:
+      # Task 1: Network Dependency Gate
+      - name: wait-for-postgres
+        image: busybox:1.36
+        command: ['sh', '-c', 'until nc -z -w 2 postgres-service 5432; do echo "Waiting for Postgres..."; sleep 2; done;']
+
+      # Task 2: Environment Pre-configuration & Security File Permissions
+      - name: setup-environment
+        image: alpine:3.18
+        command: ['sh', '-c', 'echo "ENV=production" > /config/env.properties && chmod 600 /config/env.properties']
+        volumeMounts:
+        - name: shared-config
+          mountPath: /config
+
+      containers:
+      # Main App Container (Runs only after all initContainers exit 0)
+      - name: api-server
+        image: node:20-alpine
+        command: ['node', 'app.js']
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: shared-config
+          mountPath: /app/config
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
